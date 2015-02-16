@@ -3,14 +3,16 @@ Utility to assist in keeping track of validity TLS certificates and DNSSEC signa
 
 ## How to install
 
-1. Copy relevant files to /opt/chkexp/bin and ensure correct owner and permission
+* Copy relevant files to /opt/chkexp/bin and ensure correct owner and permission
 
+```
 # mkdir -p /opt/chkexp/bin
 # cp chkexp dnssec-chkexp tls-chkexp /opt/chkexp/bin
 # chmod -R 555 /opt/chkexp
 # chown -R root:root /opt/chkexp
+```
 
-2. Copy chkexp.conf to /etc/opt/chkexp/chkexp.conf and modify it to add the checks you need
+* Copy chkexp.conf to /etc/opt/chkexp/chkexp.conf and modify it to add the checks you need
 
 To add a check for a TLS certificate on a SMTP MTA and to check the validity
 of DNSSEC signature on a zone, one might add something like
@@ -40,11 +42,11 @@ $ perl -c ./chkexp.conf
 ./chkexp.conf syntax OK
 ```
 
-3. Create a harmless user, in our example we create a user called "chkexp"
+* Create a harmless user, in our example we create a user called "chkexp"
 
 `# useradd chkexp`
 
-4. Create a crontab entry for the new user, to run the "chkexp" script at least once a day.
+* Create a crontab entry for the new user, to run the "chkexp" script at least once a day.
 
 ```
 # crontab -u chkexp <<!EOF!
@@ -72,4 +74,4 @@ Running test "/opt/chkexp/bin/tls-chkexp  -v --warn=30 --type=mx --delay=0 --smt
 INFO: Certificate expires in 586 days. (expires on Sep 25 06:40:08 2016 GMT)
 ```
 
-6. Done :)
+* Done :)
