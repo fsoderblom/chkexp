@@ -3,7 +3,8 @@ Utility to assist in keeping track of validity TLS certificates and DNSSEC signa
 
 ## How to install
 
-### Copy relevant files to /opt/chkexp/bin and ensure correct owner and permission
+### Copy files
+Copy relevant files to /opt/chkexp/bin and ensure correct owner and permission
 
 ```
 # mkdir -p /opt/chkexp/bin
@@ -12,7 +13,12 @@ Utility to assist in keeping track of validity TLS certificates and DNSSEC signa
 # chown -R root:root /opt/chkexp
 ```
 
-### Copy chkexp.conf to /etc/opt/chkexp/chkexp.conf and modify it to add the checks you need
+### Add checks
+Copy the distributed example file, chkexp.conf, to /etc/opt/chkexp/chkexp.conf and modify it to add the checks you need.
+
+```
+# cp chkexp.conf /etc/opt/chkexp/chkexp.conf
+```
 
 To add a check for a TLS certificate on a SMTP MTA and to check the validity
 of DNSSEC signature on a zone, one might add something like
@@ -42,11 +48,13 @@ $ perl -c ./chkexp.conf
 ./chkexp.conf syntax OK
 ```
 
-### Create a harmless user, in our example we create a user called "chkexp"
+### Create a harmless user
+In our example we create a mostly harmless user called "chkexp" to run the checks.
 
 `# useradd chkexp`
 
-### Create a crontab entry for the new user, to run the "chkexp" script at least once a day.
+### crontab entry
+Create a crontab entry for the new user, to run the "chkexp" script at least once a day, the example below will run the check once every day at 7:05am in the morning.
 
 ```
 # crontab -u chkexp <<!EOF!
@@ -55,7 +63,8 @@ $ perl -c ./chkexp.conf
 !EOF!
 ```
 
-### Do a manual test to see that everything is working as expected
+### Test the installation
+Do a manual test to see that everything is working as expected
 
 ```
 $ /opt/chkexp/bin/chkexp -v domain.se
@@ -74,4 +83,5 @@ Running test "/opt/chkexp/bin/tls-chkexp  -v --warn=30 --type=mx --delay=0 --smt
 INFO: Certificate expires in 586 days. (expires on Sep 25 06:40:08 2016 GMT)
 ```
 
-### If you reached this far, you should be done.
+### Done
+If you reached this far, you should be done.
