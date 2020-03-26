@@ -1,0 +1,151 @@
+#!/usr/bin/perl
+#
+# When       Who                What
+# 2009-07-07 fredrik@xpd.se     created.
+
+use strict;
+use Getopt::Long;
+
+my $cmd;
+my $service;
+my $object;
+my $output;
+my $only_check;
+
+my $debug=0;
+my $verbose=0;
+my $dryrun=0;
+my $alert=0;
+
+my $config = "/etc/opt/chkexp/chkexp.conf";
+my $sendmail = "/usr/sbin/sendmail -oi -t";
+my $dnssec_chkexp = "/opt/chkexp/bin/dnssec-chkexp";
+my $dnssec_chkexp_opts = "";
+my $tls_chkexp = "/opt/chkexp/bin/tls-chkexp";
+my $tls_chkexp_opts = "";
+my $usage = "Usage: " . $0 . " [-d|--debug] [-v|--verbose] [-c file|--config=file] [-n|--dry-run] [--no-alert] [--alert] object\n";
+
+#
+# Start of functions
+#
+
+sub doCmd
+{
+        die "ERROR: can't execute DNSSEC test \"$dnssec_chkexp\".\n" if !-x $dnssec_chkexp;
+        die "ERROR: can't execute TLS test \"$tls_chkexp\".\n" if !-x $tls_chkexp;
+
+        if ($only_check) {
+                return if (!($cmd =~ /$only_check/));
+        }
+
+        print "Running test \"$cmd\"" if $verbose;
+        $output = `$cmd </dev/null 2>&1` unless $dryrun;
+        if (!$?) {
+                print ($dryrun ? "\n" : " -- passed\n") if ($verbose);
+                print $output . "\n" if ($verbose && $output);
+        } else {
+                print " -- FAILED\n" if $verbose;
+                print $output . "\n";
+                if ($alert) {
+                        &sendAlert if ($?);
+                }
+        }
+}
+
+sub sendAlert
+{
+        open(SENDMAIL, "|$sendmail") or die "Cannot open $sendmail: $!";
+        print SENDMAIL "To: $CFG::CFG{$service}{$object}{'contact'}\n";
+        if ($service =~ /DNSSEC/i) {
+                print SENDMAIL "Subject: WARNING: The DNSSEC signed zone \"$object\" failed validation.\n"
+        } else {
+                print SENDMAIL "Subject: WARNING: The TLS channel to \"$object\" for $service communication failed validation.\n"
+        }
+        printf SENDMAIL "\n" . $output;
+        close(SENDMAIL);
+}
+
+#
+# The config file parsing is jdhedden's code (http://www.perlmonks.org/?node_id=464358)
+#
+
+sub readCfg
+{
+    my $file = $_[0];
+    our $err;
+    {   # Put config data into a separate namespace
+        package CFG;
+        # Process the contents of the config file
+        my $rc = do($file);
+        # Check for errors
+        if ($@) {
+            $::err = "ERROR: Failure compiling '$file' - $@";
+        } elsif (! defined($rc)) {
+            $::err = "ERROR: Failure reading '$file' - $!";
+        } elsif (! $rc) {
+            $::err = "ERROR: Failure processing '$file'";
+        }
+    }
+    return ($err);
+}
+
+#
+# End of functions
+#
+
+GetOptions("d+" => \$debug,
+           "debug" => \$debug,
+           "v+" => \$verbose,
+           "verbose" => \$verbose,
+           "c=s" => \$config,
+           "config=s" => \$config,
+           "-n" => \$dryrun,
+           "--dry-run" => \$dryrun,
+           "--alert" => sub { $alert = 1 },
+           "--no-alert"=> sub { $alert = 0 });
+die $usage if $Getopt::Long::error;
+
+$only_check=shift;
+$verbose=1 if $debug;
+
+# Propagate verbose and debug flags down to test programs.
+$dnssec_chkexp_opts = $dnssec_chkexp_opts . " -v" if $verbose;
+$dnssec_chkexp_opts = $dnssec_chkexp_opts . " -d" if $debug;
+$tls_chkexp_opts = $tls_chkexp_opts . " -v" if $verbose;
+$tls_chkexp_opts = $tls_chkexp_opts . " -d" if $debug;
+
+#
+# Parse the configuration file
+#
+if (my $err = readCfg($config)) {
+    print(STDERR $err, "\n");
+    exit(1);
+}
+
+# Usage: dnssec-chkexp [-d|--debug] [-v|--verbose] [--warn=hour/s] domain.tld
+# Usage: tls-chkexp [-d|--debug] [-v|--verbose] [--smtp|--imap|--pop3] [--port=n] [--warn=days] <hostname|ip address>
+
+while (my $svc = each %CFG::CFG) {
+        for my $obj ( sort keys %{ $CFG::CFG{$svc} } ) {
+                print "DEBUG: Found \"$svc\" check for $obj\n" if $debug;
+                my $warn = ($CFG::CFG{$svc}{$obj}{'threshold'} ? $CFG::CFG{$svc}{$obj}{'threshold'} : 0);
+                my $delay = ($CFG::CFG{$svc}{$obj}{'delay'} ? $CFG::CFG{$svc}{$obj}{'delay'} : 0);
+                if ($svc =~ /DNSSEC/) {
+                        $cmd = "$dnssec_chkexp $dnssec_chkexp_opts --warn=$warn $obj";
+                } elsif ($svc =~ /smtp/i) {
+                        $cmd = "$tls_chkexp $tls_chkexp_opts --warn=$warn --type=$CFG::CFG{$svc}{$obj}{'type'} --delay=$delay --smtp $obj";
+                } elsif ($svc =~ /pop3/i) {
+                        $cmd = "$tls_chkexp $tls_chkexp_opts --warn=$warn --delay=$delay --pop3 $obj";
+                } elsif ($svc =~ /imap/i) {
+                        $cmd = "$tls_chkexp $tls_chkexp_opts --warn=$warn --delay=$delay --imap $obj";
+                } else {
+                        $cmd = "$tls_chkexp $tls_chkexp_opts --warn=$warn --delay=$delay $obj";
+                }
+                # Kludge, $service wasnt visible outside of scope.
+                $object = $obj;
+                $service = $svc;
+                &doCmd;
+        }
+}
+
+exit;

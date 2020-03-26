@@ -1,0 +1,215 @@
+#!/usr/bin/perl
+#
+# Check if a TLS certificate is about to expire.
+#
+# When       Who                What
+# 2009-03-20 fredrik@xpd.se     created.
+
+use strict;
+use warnings;
+use POSIX;
+use Getopt::Long;
+use File::Temp qw(tempfile);
+use IO::Socket;
+use Net::DNS;
+
+my %mon2num = qw(
+  jan 1  feb 2  mar 3  apr 4  may 5  jun 6
+  jul 7  aug 8  sep 9  oct 10 nov 11 dec 12
+);
+
+my $debug;
+my $verbose;
+my $smtp;
+my $pop3;
+my $imap;
+my $port;
+my $lowater=30;
+my $type="host";
+my $starttls="";
+my $host;
+my @hosts;
+my @nested_mx;
+my $ok=0;
+my $errors=0;
+my $warn=0;
+my $delay=0;
+my $exitcode = 0; # catch exit code
+my $TIMEOUT = 240; # timeout when waiting for system()
+
+my $usage = "Usage: " . $0 . " [-d|--debug] [-v|--verbose] [--smtp|--imap|--pop3] [--port=n] [--warn=days] [--type=<host|mx>] <hostname|ip address>";
+
+GetOptions("d+"		=> \$debug,
+	   "debug+"	=> \$debug,
+	   "v"		=> \$verbose,
+	   "verbose"	=> \$verbose,
+	   "smtp"	=> \$smtp,
+	   "pop3"	=> \$pop3,
+	   "imap"	=> \$imap,
+	   "--port=i"	=> \$port,
+	   "--warn=i"	=> \$lowater,
+	   "--delay=i"	=> \$delay,
+	   "--type=s"	=> \$type);
+die $usage if $Getopt::Long::error;
+
+my $domain=shift;
+if (!$domain) {
+	print $usage . "\n";
+	exit;
+}
+$verbose=1 if $debug;
+
+if ($smtp) {
+	$port=25 unless $port;
+	$starttls = "-starttls smtp";
+} elsif ($imap) {
+	$port=993 unless $port;
+} elsif ($pop3) {
+	$port=995 unless $port;
+} else {
+	$port=443 unless $port;
+}
+
+if (lc($type) eq "mx") {
+	my $res = new Net::DNS::Resolver;
+	my @mx = mx($res, $domain);
+	if (@mx) {
+		foreach my $rr (@mx) {
+			print "Found \"", $rr->exchange, "\", as MX RR for \"$domain\" with weight ", $rr->preference, "\n" if ($debug);
+			push(@hosts, $rr->exchange);
+		}
+		foreach my $host (@hosts) {
+			my @additional_mx = mx($res, $host);
+			if (@additional_mx) {
+				foreach my $rr (@additional_mx) {
+					print "Found \"", $rr->exchange, "\", as nested MX RR for \"$host\" with weight ", $rr->preference, "\n" if ($verbose);
+					push(@nested_mx, $rr->exchange);
+				}
+			}
+		}
+	}
+	else {
+		print "ERROR: Can't find MX records for $domain: ", $res->errorstring, "\n";
+		exit $errors;
+	}
+} else {
+	push(@hosts, $domain);
+}
+
+# Check if nested MX
+if (@nested_mx) {
+	@hosts = @nested_mx;
+}
+
+foreach $host (@hosts) {
+	# Check if host is reachable
+	my $socket = IO::Socket::INET->new(PeerAddr=>$host, PeerPort=>$port, Proto=>"tcp", Type=>SOCK_STREAM) or next;
+	close($socket);
+	sleep($delay) if $delay;
+
+	my ($tmpfh, $tempfile) = tempfile(DIR => '/tmp', UNLINK => 1);
+	die "Failed to open temp file: $!" unless(defined($tmpfh));
+
+	my $cmd = "openssl s_client $starttls -connect $host:$port";
+	print "$cmd\n" if $debug;
+
+	eval {
+		local $SIG{ALRM} = sub { die "timeout\n" };
+		alarm $TIMEOUT; # change to timeout length
+		$exitcode = system("echo QUIT | openssl s_client $starttls -connect $host:$port >$tempfile 2>/dev/null");
+		alarm 0;
+	};
+
+	if ($@ eq "timeout\n") {
+		warn "WARNING: timeout when trying to reach $host (on port $port)\n";
+		$errors++;
+		next;
+	}
+
+	if ($exitcode != 0) {
+		if ($exitcode == -1) {
+			print "ERROR: failed to execute command \"$cmd\": $!\n";
+		} elsif ($exitcode & 127) {
+			printf "ERROR: command \"%s\" died with signal %d, %s coredump\n", $cmd, ($exitcode & 127),  ($exitcode & 128) ? 'with' : 'without';
+		} else {
+			printf "ERROR: command \"%s\" exited with value %d\n", $cmd, $exitcode >> 8;
+		}
+		$errors++;
+		next;
+	}
+
+	print "openssl x509 -enddate -noout -in $tempfile\n" if $debug;
+	my ($enddate) = `openssl x509 -enddate -noout -in $tempfile 2>/dev/null`;
+	if ($? != 0) {
+		print "WARNING: $host does not support TLS.\n";
+		$errors++;
+		next;
+	}
+	($enddate)=~s{notAfter=}{};
+	chomp($enddate);
+	$tmpfh->close;
+
+	# Certificate expires on Aug 29 23:59:59 2010 GMT
+	# notAfter=Nov 10 23:59:59 2011 GMT
+	# notAfter=Nov  9 23:59:59 2011 GMT
+	$enddate =~ /(\w{3})\s{1,2}(\d{1,2}) (\d{2}):(\d{2}):(\d{2}) (\d{4})/;
+	my $month = $mon2num{lc substr($1, 0, 3)};
+	my $expiration = mktime($5, $4, $3, $2, $month - 1, $6 - 1900, 0, 0);
+	my $daystogo = int((($expiration-time())/3600)/24);
+
+	if ($daystogo <= 0) {
+		print "ERROR: Certificate is expired. (expired on " . $enddate . ")\n";
+		$errors++;
+		next;
+	}
+
+	if ($daystogo <= $lowater) {
+		print "WARNING: Certificate for " . $host . " will expire within " . $daystogo . " days. (expires on " . $enddate . ")\n";
+		$warn++;
+	} else {
+		print "INFO: Certificate expires in " . $daystogo . " days. (expires on " . $enddate . ")\n" if $verbose;
+		$ok++;
+	}
+}
+
+my $total = $errors + $warn + $ok;
+if ($total == 0) {
+        print "ERROR: All tests failed. No valid servers found.\n";
+        exit 1;
+}
+my $quorum = ($errors + $warn) / $total;
+if ($total == $errors) {
+	print "ERROR: $errors (e.g. all) of the $total tested server/s had error/s. Service will not work.\n";
+	exit $errors;
+}
+
+if (!$warn && $errors) {
+	if ($quorum > 0.5) {
+		print "WARNING: $errors of the $total tested server/s had error/s, service is negatively affected.\n";
+		exit $errors;
+	} else {
+		print "WARNING: $errors of the $total tested server/s had error/s, but a majority (>50%) is working.\n";
+		exit;
+	}
+}
+
+if ($warn && !$errors) {
+	if ($quorum > 0.5) {
+		print "WARNING: $warn of the $total tested server/s had warning/s, service might be affected.\n";
+		exit $warn;
+	} else {
+		print "WARNING: $errors of the $total tested server/s had error/s, but a majority (>50%) is working.\n";
+		exit;
+	}
+}
+
+if ($warn && $errors) {
+	if ($quorum > 0.5) {
+		print "WARNING: " . ($errors + $warn) . " of the $total tested server/s had error/s ($errors) or warning/s ($warn), service is negatively affected.\n";
+	} else {
+		print "WARNING: $errors of the $total tested server/s had error/s, but a majority (>50%) is working.\n";
+		exit;
+	}
+}
+
+exit $errors;

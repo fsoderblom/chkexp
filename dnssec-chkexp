@@ -1,0 +1,199 @@
+#!/usr/bin/perl
+#
+# code based on the checkexpire.pl script from nlnet Labs
+#
+# When	     Who		What
+# 2009-03-20 fredrik@xpd.se	created.
+
+use strict;
+use Getopt::Long;
+use Net::DNS 0.68;
+use Net::DNS::SEC;
+use Time::Local;
+
+my $debug=0;
+my $verbose=0;
+my $lowater=24;
+my $warnings=0;
+my @ns;
+my $count_ns=0;
+my @dead_ns;
+my $usage = "Usage: " . $0 . " [-d|--debug] [-v|--verbose] [--warn=hour/s] domain.tld";
+
+#
+# Functions
+#
+sub getPTR($) {
+	my $ip = shift;
+	my $r = Net::DNS::Resolver->new;
+	my $reverse = join('.', reverse(split /\./, $ip)) . ".in-addr.arpa";
+	if (my $ap = $r->query($reverse, "PTR")) {
+		for my $pa ($ap->answer) {
+			return $pa->ptrdname;
+		}
+	}
+	else {
+		return "NXDOMAIN";
+	}
+}
+
+#
+# End of functions
+#
+
+GetOptions("d+"=>\$debug, "debug+"=>\$debug, "v"=>\$verbose, "verbose"=>\$verbose, "--warn=i"=>\$lowater);
+my $domain=shift;
+$verbose=1 if $debug;
+
+if (!$domain) {
+	print $usage . "\n";
+	exit;
+}
+
+# Setting up the resolver (use perldoc Net::DNS::Resolver for the
+# documentation of this class and its methods)
+
+my $res = Net::DNS::Resolver->new();
+my $query = $res->query($domain, "NS");
+
+if ($query) {
+	foreach my $rr (grep { $_->type eq 'NS' } $query->answer) {
+		print "DEBUG: " . $rr->nsdname . "\n" if ($debug > 1);
+		my $_query = $res->search($rr->nsdname);
+		if ($_query) {
+			foreach my $_rr ($_query->answer) {
+				next unless $_rr->type eq "A";
+				print "DEBUG: " . $_rr->address . "\n" if ($debug > 1);
+				print $domain . " is delegated to " . $rr->nsdname . " (" . $_rr->address . ")\n" if ($verbose);
+				$count_ns++;
+				push (@ns, $_rr->address);
+			}
+		} else {
+			print "query failed: ", $res->errorstring, "\n";
+			$warnings++;
+		}
+	}
+} else {
+	print "query failed: ", $res->errorstring, "\n";
+	$warnings++;
+}
+
+foreach my $ns (@ns) {
+	# Set up the resolver object so it queries the authoritative server.
+	$res->nameserver($ns);
+	print "DEBUG: $ns\n" if $debug;
+
+	# Set up the resolver so that it talks DNSSEC
+	$res->dnssec(1);
+
+	# Send the query for the soa to the authoritative nameserver.
+	my $packet=$res->send($domain, "SOA");
+	if ($packet == undef) { # NS didn't respond
+		push (@dead_ns, $ns);
+		next;
+	}
+
+	# Digest the answer section, realizing there may be more than one
+	# RRSIG (per definition there is always one SOA RR.
+
+	my $soa;
+	my @soasig;
+
+	foreach my $rr ($packet->answer) {
+		if ($rr->type eq "SOA") {
+			$soa=$rr;
+			next;
+		}
+		if ($rr->type eq "RRSIG") {
+			push @soasig,$rr;
+			next;
+		}
+	}
+
+	if (!$soa) {
+		$warnings++;
+		print "ERROR: the zone \"$domain\" is delegated to, but does not exist at $ns\n";
+		next;
+	}
+	if (!@soasig) {
+		$warnings++;
+		print "ERROR: the zone \"$domain\" is not DNSSEC signed at $ns.\n";
+		next;
+	}
+
+	print "DEBUG: " . @soasig ." signatures found\n" if $debug;
+
+	my @keyrr;
+
+	# Fetch the keys that belong to this zone (DNSKEYs live, like the SOA at the apex.)
+
+	$packet=$res->send($domain,"DNSKEY");
+	foreach my $rr ($packet->answer) {
+		if ($rr->type eq "DNSKEY") {
+			push @keyrr,$rr;
+			next;
+		}
+	}
+
+	die "NO DNSKEYS found for $domain" unless @keyrr;
+
+	# Now loop over each signature, fetch the public part of the key with
+	# which the signature was made, validate the signature and do the date
+	# comparisson.
+
+	SIGLOOP: foreach my $sig (@soasig) {
+		print "DEBUG: Checking signature made with key " . $sig->keytag ."\n" if $debug;
+
+		# verify the signature.
+		# first select the key with the proper keytag from the key set.
+
+		my $keyfound=0;
+		KEYLOOP: foreach my $key (@keyrr) {
+			next KEYLOOP if ($key->keytag != $sig->keytag);
+			$keyfound=$key;
+			last KEYLOOP;
+		}
+
+		print "WARNING: NO public key found to validate:\n " . $sig->string . "\n" unless $keyfound;
+
+		# Do the actual validation.
+		if (!$sig->verify([$soa], $keyfound)) {
+			# The signature did not validate. Say why.
+			print "$ns: WARNING: Signature made with " . $sig->keytag . " failed to verify. (" . $sig->vrfyerrstr . ")\n";
+			$warnings++;
+		} else {
+			print "$ns: zone \"$domain\" verified with signature made with key " . $sig->keytag . ".\n" if $verbose;
+			# The signature validated.
+			# Lets verify if we have more than 24 hours before expiration.
+
+			$sig->sigexpiration =~ /(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})/;
+			my $expiration=timegm ($6, $5, $4, $3, $2-1, $1-1900);
+			my $hourstogo=($expiration-time())/3600;
+			if ($hourstogo <= $lowater) {
+				print "$ns: WARNING: Signature on zone \"$domain\" made with ".$sig->keytag . " will expire within ". int($hourstogo) . " hours\n";
+				$warnings++;
+			}
+			print "$ns: Signature will expire within ". int($hourstogo) . " hours\n" if $debug;
+		}
+	}
+}
+
+if (scalar @dead_ns != 0) {
+	my $str;
+	if (scalar @dead_ns == $count_ns) {
+		$warnings++;
+		$str .= "ERROR: None of the " . $count_ns . " delegated nameservers for the domain \"" . $domain . "\" is responding\n";
+		$str .= "\nExpect serious operational issues for services in \"" . $domain . "\" if the domain is in active use\nand no other disruption exists (internet connection is working etc)\n\n";
+	} else {
+		$warnings++;
+		$str .= "INFO: " . scalar @dead_ns . " of the " . $count_ns . " delegated nameservers for the domain \"" . $domain . "\" is not responding.\n";
+		$str .= "\nNormally this is not an issue for services in the domain " . $domain . " since " . ($count_ns - (scalar @dead_ns)) . " other nameservers\nis still reachable and working, if this issue persists it might be a good idea to contact\nthe provider for the below listed nameservers.\n\n";
+	}
+	foreach my $srv (@dead_ns) {
+		my $name = &getPTR($srv);
+		$str .= "$srv ($name)\n";
+	}
+	print $str;
+}
+
+exit $warnings ? $warnings : 0;
