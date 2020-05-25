@@ -1,6 +1,6 @@
 # chkexp
 
-Utility to assist in keeping track of validity TLS certificates and DNSSEC signatures
+Utility to assist in keeping track validity of TLS certificates and DNSSEC signatures
 
 ## How to install
 
