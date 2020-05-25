@@ -126,26 +126,27 @@ if (my $err = readCfg($config)) {
 # Usage: tls-chkexp [-d|--debug] [-v|--verbose] [--smtp|--imap|--pop3] [--port=n] [--warn=days] <hostname|ip address>
 
 while (my $svc = each %CFG::CFG) {
-        for my $obj ( sort keys %{ $CFG::CFG{$svc} } ) {
-                print "DEBUG: Found \"$svc\" check for $obj\n" if $debug;
-                my $warn = ($CFG::CFG{$svc}{$obj}{'threshold'} ? $CFG::CFG{$svc}{$obj}{'threshold'} : 0);
-                my $delay = ($CFG::CFG{$svc}{$obj}{'delay'} ? $CFG::CFG{$svc}{$obj}{'delay'} : 0);
-                if ($svc =~ /DNSSEC/) {
-                        $cmd = "$dnssec_chkexp $dnssec_chkexp_opts --warn=$warn $obj";
-                } elsif ($svc =~ /smtp/i) {
-                        $cmd = "$tls_chkexp $tls_chkexp_opts --warn=$warn --type=$CFG::CFG{$svc}{$obj}{'type'} --delay=$delay --smtp $obj";
-                } elsif ($svc =~ /pop3/i) {
-                        $cmd = "$tls_chkexp $tls_chkexp_opts --warn=$warn --delay=$delay --pop3 $obj";
-                } elsif ($svc =~ /imap/i) {
-                        $cmd = "$tls_chkexp $tls_chkexp_opts --warn=$warn --delay=$delay --imap $obj";
-                } else {
-                        $cmd = "$tls_chkexp $tls_chkexp_opts --warn=$warn --delay=$delay $obj";
-                }
-                # Kludge, $service wasnt visible outside of scope.
-                $object = $obj;
-                $service = $svc;
-                &doCmd;
-        }
+	for my $obj ( sort keys %{ $CFG::CFG{$svc} } ) {
+		print "DEBUG: Found \"$svc\" check for $obj\n" if $debug;
+		my $warn = ($CFG::CFG{$svc}{$obj}{'threshold'} ? $CFG::CFG{$svc}{$obj}{'threshold'} : 0);
+		my $delay = ($CFG::CFG{$svc}{$obj}{'delay'} ? $CFG::CFG{$svc}{$obj}{'delay'} : 0);
+		my $type = ($CFG::CFG{$svc}{$obj}{'type'} ? $CFG::CFG{$svc}{$obj}{'type'} : 'mx');
+		if ($svc =~ /DNSSEC/) {
+			$cmd = "$dnssec_chkexp $dnssec_chkexp_opts --warn=$warn $obj";
+		} elsif ($svc =~ /smtp/i) {
+			$cmd = "$tls_chkexp $tls_chkexp_opts --warn=$warn --type=$type --delay=$delay --smtp $obj";
+		} elsif ($svc =~ /pop3/i) {
+			$cmd = "$tls_chkexp $tls_chkexp_opts --warn=$warn --delay=$delay --pop3 $obj";
+		} elsif ($svc =~ /imap/i) {
+			$cmd = "$tls_chkexp $tls_chkexp_opts --warn=$warn --delay=$delay --imap $obj";
+		} else {
+			$cmd = "$tls_chkexp $tls_chkexp_opts --warn=$warn --delay=$delay $obj";
+		}
+		# Kludge, $service wasnt visible outside of scope.
+		$object = $obj;
+		$service = $svc;
+		&doCmd;
+	}
 }
 
 exit;

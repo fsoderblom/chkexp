@@ -26,22 +26,29 @@ Copy the distributed example file, chkexp.conf, to /etc/opt/chkexp/chkexp.conf a
 To add a check for a TLS certificate on a SMTP MTA and to check the validity
 of DNSSEC signature on a zone, one might add something like
 
-```bash
+```perl
 %CFG = (
     'DNSSEC' => {
         'domain.se' => {
-            'threshold' => '24',
-            'contact'   => 'hostmaster@domain.se',
+            'threshold'  => '24',
+            'contact'    => 'hostmaster@domain.se',
         }
     },
     'SMTP' => {
+        'domain.se' => {
+            'threshold'  => '30',
+            'contact'    => 'postmaster@domain.se,hostmaster@domain.org',
+        },
         'smtp.domain.se' => {
             'threshold'  => '30',
             'contact'    => 'postmaster@domain.se,hostmaster@domain.org',
+            'type'       => 'host',
         },
     }
 );
 ```
+
+The "type" directive is optional and defaults to 'mx' if it is missing from the configuration.
 
 Make sure to check validity of the file afterward by issuing a "perl -c ./chkexp.conf",
 it should say something like
@@ -94,3 +101,7 @@ INFO: Certificate expires in 586 days. (expires on Sep 25 06:40:08 2016 GMT)
 ### Done
 
 If you reached this far, you should be done.
+
+### Contributors
+
+Victor Johansson
