@@ -11,6 +11,7 @@ use POSIX;
 use Getopt::Long;
 use File::Temp qw(tempfile);
 use IO::Socket;
+use IO::Socket::INET6;
 use Net::DNS;
 
 my %mon2num = qw(
@@ -30,6 +31,8 @@ my $starttls="";
 my $host;
 my @hosts;
 my @nested_mx;
+my @multihomed;
+my @multihomed_mx;
 my $ok=0;
 my $errors=0;
 my $warn=0;
@@ -39,6 +42,65 @@ my $TIMEOUT = 240; # timeout when waiting for system()
 
 my $usage = "Usage: " . $0 . " [-d|--debug] [-v|--verbose] [--smtp|--imap|--pop3] [--port=n] [--warn=days] [--type=<host|mx>] <hostname|ip address>";
 
+#
+# Subs
+#
+
+sub nestedMX($) # Array
+{
+	my ($arr) = @_;
+	my @hosts = @{ $arr };
+
+	my @nested_mx;
+
+	#
+	# Check if a MX points to another MX
+	my $res = new Net::DNS::Resolver;
+	foreach my $host (@hosts) {
+		my @additional_mx = mx($res, $host);
+		if (@additional_mx) {
+			foreach my $rr (@additional_mx) {
+				print "INFO: Found \"", $rr->exchange, "\", as nested MX RR for \"$host\" with weight ", $rr->preference, "\n";
+				push(@nested_mx, $rr->exchange);
+			}
+		}
+	}
+	return @nested_mx;
+}
+
+sub multihomedHost($) # Array
+{
+	my ($arr) = @_;
+	my @hosts = @{ $arr };
+
+	my @addr;
+	my @multihomed;
+
+	#
+	# Check if each member in has multiple A or AAAA RR
+	my $res = new Net::DNS::Resolver;
+	my @rr = ("A", "AAAA");
+	foreach my $rr_type (@rr) {
+		foreach my $host (@hosts) {
+			my @dns_rr = rr($res, $host, $rr_type);
+			if (scalar(@dns_rr) > 1) {
+				foreach my $rr (@dns_rr) {
+					push(@multihomed, $rr->address);
+					push(@addr, $rr->address);
+				}
+				my $str = join(", ", @addr);
+				print "INFO: Detected a multihomed host \"$host\" (multiple " . $rr_type . " RR): " . $str . "\n";
+				undef(@addr);
+			}
+		}
+	}
+	return @multihomed;
+}
+
+#
+# Start of main
+#
+#
 GetOptions("d+"		=> \$debug,
 	   "debug+"	=> \$debug,
 	   "v"		=> \$verbose,
@@ -74,21 +136,24 @@ if (lc($type) eq "mx") {
 	my $res = new Net::DNS::Resolver;
 	my @mx = mx($res, $domain);
 	if (@mx) {
+		# Has MX:
+		# 1. Plain MX points to A RR
+		# 2. MX points to other MX (rare)
+		# 3. MX points to other MX which is multihomed (rare)
+		# 4. MX points to multiple A/AAAA RR (common)
 		foreach my $rr (@mx) {
-			print "Found \"", $rr->exchange, "\", as MX RR for \"$domain\" with weight ", $rr->preference, "\n" if ($debug);
+			print "Found \"", $rr->exchange, "\", as MX RR for \"$domain\" with weight ", $rr->preference, "\n" if ($verbose);
 			push(@hosts, $rr->exchange);
 		}
-		foreach my $host (@hosts) {
-			my @additional_mx = mx($res, $host);
-			if (@additional_mx) {
-				foreach my $rr (@additional_mx) {
-					print "Found \"", $rr->exchange, "\", as nested MX RR for \"$host\" with weight ", $rr->preference, "\n" if ($verbose);
-					push(@nested_mx, $rr->exchange);
-				}
-			}
+		@nested_mx = nestedMX(\@hosts);
+		if (scalar(@nested_mx) > 0) {
+			@multihomed = multihomedHost(\@nested_mx);
+			push(@multihomed_mx, @multihomed) if (@multihomed);
+		} else {
+			@multihomed = multihomedHost(\@hosts);
+			push(@multihomed_mx, @multihomed) if (@multihomed);
 		}
-	}
-	else {
+	} else {
 		print "ERROR: Can't find MX records for $domain: ", $res->errorstring, "\n";
 		exit $errors;
 	}
@@ -96,20 +161,32 @@ if (lc($type) eq "mx") {
 	push(@hosts, $domain);
 }
 
-# Check if nested MX
-if (@nested_mx) {
+# Check if nested MX or multihomed MX
+if ((scalar(@nested_mx) > 0) and (scalar(@multihomed_mx) > 0)) { # Highest precedence, nested MX and multihomed
+	print "INFO: Nested MX and multihomed (MX points to MX with multiple A/AAAA), quite odd and rare.\n";
+	@hosts = @multihomed_mx;
+	push(@hosts, @nested_mx);
+} elsif (scalar(@nested_mx) > 0) { # Nested MX, but not multihomed
+	print "INFO: Nested MX (MX points to MX), rare.\n";
 	@hosts = @nested_mx;
+} elsif (scalar(@multihomed_mx) > 0) { # Only multihomed MX
+	print "INFO: Multihomed MX (MX with multiple A/AAAA), somewhat common.\n";
+	@hosts = @multihomed_mx;
 }
 
 foreach $host (@hosts) {
-	# Check if host is reachable
-	my $socket = IO::Socket::INET->new(PeerAddr=>$host, PeerPort=>$port, Proto=>"tcp", Type=>SOCK_STREAM) or next;
+	my $socket = IO::Socket::INET6->new(PeerAddr=>$host, PeerPort=>$port, Proto=>"tcp", Type=>SOCK_STREAM);
+	if (not $socket) {
+		print "WARNING Could not connect to " . $host . " and establish TLS, skipping host.\n";
+		next;
+	}
 	close($socket);
 	sleep($delay) if $delay;
 
 	my ($tmpfh, $tempfile) = tempfile(DIR => '/tmp', UNLINK => 1);
 	die "Failed to open temp file: $!" unless(defined($tmpfh));
 
+	$host = "[" . $host . "]" if (index($host, ":") != -1); # Bare IPv6 address?
 	my $cmd = "openssl s_client $starttls -connect $host:$port";
 	print "$cmd\n" if $debug;
 
@@ -174,8 +251,8 @@ foreach $host (@hosts) {
 
 my $total = $errors + $warn + $ok;
 if ($total == 0) {
-        print "ERROR: All tests failed. No valid servers found.\n";
-        exit 1;
+	print "ERROR: All tests failed. No valid servers found.\n";
+	exit 1;
 }
 my $quorum = ($errors + $warn) / $total;
 if ($total == $errors) {
@@ -188,7 +265,7 @@ if (!$warn && $errors) {
 		print "WARNING: $errors of the $total tested server/s had error/s, service is negatively affected.\n";
 		exit $errors;
 	} else {
-		print "WARNING: $errors of the $total tested server/s had error/s, but a majority (>50%) is working.\n";
+		print "WARNING: $errors of the $total tested server/s had error/s, but a majority (>=50%) is working.\n";
 		exit;
 	}
 }
@@ -198,7 +275,7 @@ if ($warn && !$errors) {
 		print "WARNING: $warn of the $total tested server/s had warning/s, service might be affected.\n";
 		exit $warn;
 	} else {
-		print "WARNING: $errors of the $total tested server/s had error/s, but a majority (>50%) is working.\n";
+		print "WARNING: $errors of the $total tested server/s had error/s, but a majority (>=50%) is working.\n";
 		exit;
 	}
 }
@@ -207,7 +284,7 @@ if ($warn && $errors) {
 	if ($quorum > 0.5) {
 		print "WARNING: " . ($errors + $warn) . " of the $total tested server/s had error/s ($errors) or warning/s ($warn), service is negatively affected.\n";
 	} else {
-		print "WARNING: $errors of the $total tested server/s had error/s, but a majority (>50%) is working.\n";
+		print "WARNING: $errors of the $total tested server/s had error/s, but a majority (>=50%) is working.\n";
 		exit;
 	}
 }
