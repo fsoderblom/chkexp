@@ -13,6 +13,7 @@ use File::Temp qw(tempfile);
 use IO::Socket;
 use IO::Socket::INET6;
 use Net::DNS;
+use Net::IP;
 
 my %mon2num = qw(
   jan 1  feb 2  mar 3  apr 4  may 5  jun 6
@@ -175,10 +176,15 @@ if ((scalar(@nested_mx) > 0) and (scalar(@multihomed_mx) > 0)) { # Highest prece
 }
 
 foreach $host (@hosts) {
-	my $socket = IO::Socket::INET6->new(PeerAddr=>$host, PeerPort=>$port, Proto=>"tcp", Type=>SOCK_STREAM);
+	my $socket;
+	$socket = IO::Socket::INET6->new(PeerAddr=>$host, PeerPort=>$port, Proto=>"tcp", Type=>SOCK_STREAM);
 	if (not $socket) {
-		print "WARNING Could not connect to " . $host . " and establish TLS, skipping host.\n";
-		next;
+		print "WARNING: Could not connect to " . $host . " over IPv6, will retry with IPv4.\n";
+		$socket = IO::Socket::INET6->new(PeerAddr=>$host, PeerPort=>$port, Proto=>"tcp", Type=>SOCK_STREAM, Domain=>AF_INET);
+		if (not $socket) {
+			print "ERROR: Could not connect to " . $host . " and establish TLS, skipping host.\n";
+			next;
+		}
 	}
 	close($socket);
 	sleep($delay) if $delay;

@@ -69,12 +69,12 @@ if ($query) {
 				push (@ns, $_rr->address);
 			}
 		} else {
-			print "query failed: ", $res->errorstring, "\n";
+			print $rr->nsdname . ": query failed: ", $res->errorstring, "\n";
 			$warnings++;
 		}
 	}
 } else {
-	print "query failed: ", $res->errorstring, "\n";
+	print $domain . ": initial query failed: ", $res->errorstring, "\n";
 	$warnings++;
 }
 
@@ -128,14 +128,19 @@ foreach my $ns (@ns) {
 	# Fetch the keys that belong to this zone (DNSKEYs live, like the SOA at the apex.)
 
 	$packet=$res->send($domain,"DNSKEY");
-	foreach my $rr ($packet->answer) {
-		if ($rr->type eq "DNSKEY") {
-			push @keyrr,$rr;
-			next;
+	if ($packet) {
+		foreach my $rr ($packet->answer) {
+			if ($rr->type eq "DNSKEY") {
+				push @keyrr,$rr;
+				next;
+			}
 		}
+	} else {
+		warn $ns . ": query failed: ", $res->errorstring, "\n";
+		next;
 	}
 
-	die "NO DNSKEYS found for $domain" unless @keyrr;
+	warn "NO DNSKEYS found for $domain" unless @keyrr;
 
 	# Now loop over each signature, fetch the public part of the key with
 	# which the signature was made, validate the signature and do the date
